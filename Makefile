@@ -1,21 +1,22 @@
-#CS 360 Lab 7 Makefile
+#CS 360 Lab 9 Makefile CC = gcc 
+CFLAGS = -g -c
+SOCKLIB = sockettome.o
 
-CC = gcc 
-
-CFLAGS = -g
+INCLUDES = -I/home/plank/cs360/notes/Sockets
 
 EXECUTABLES: chat_server
 
 all: $(EXECUTABLES)
 
-char_server: char_server.o
-	$(CC) -o chat_server chat_server.o 
+# sockettome.o: 
+# 	$(CC) $(CFLAGS) /home/plank/cs360/notes/Sockets/sockettome.c
 
-chat_server.o: chat_server.c
-	$(CC) $(CFLAGS) -c chat_server.c
+chat_server: chat_server.o sockettome.o
+	$(CC) -o chat_server chat_server.o sockettome.o -lpthread
 
-#make clean will rid your directory of the executable,
-#object files, and any core dumps you've caused
+chat_server.o: chat_server.c /home/plank/cs360/notes/Sockets/sockettome.c
+	$(CC) $(CFLAGS) $(INCLUDES) chat_server.c /home/plank/cs360/notes/Sockets/sockettome.c
+
 clean:
 	rm chat_server
 	rm chat_server.o
