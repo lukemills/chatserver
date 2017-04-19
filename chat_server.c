@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <signal.h>
 #include "dllist.h"
 #include "jrb.h"
 #include "sockettome.h"
@@ -41,6 +42,7 @@ void destroyClient(Client *c, int onList);
 void *roomThreadOp(void *package);
 int sendMessage(Client *client, char *message);
 void handleClientLeft(Client *client);
+void killChatServerHandler(int d);
 
 int main(int argc, char **argv){
 	int i, numRooms, port, s, fd, fd2;
@@ -51,6 +53,11 @@ int main(int argc, char **argv){
 	Client *ctmp;
 	startClient sctmp;
 	pthread_t clientT, roomT;
+
+	/* TODO Fix signal handling or remove
+	signal(SIGINT, killChatServerHandler);
+	signal(SIGKILL, killChatServerHandler);
+	*/
 
 	if(argc < 3){
 		fprintf(stderr, "usage: ./chat-server port Chat-Room-Names ...\n");
@@ -66,7 +73,7 @@ int main(int argc, char **argv){
 
 	rooms = make_jrb();
 
-	/* Allocate and create rooms */
+	/* Create rooms */
 	numRooms = argc - 2;
 	for(i = 0; i < numRooms; i++){
 		rtmp = (Room*) malloc(sizeof(Room));
@@ -107,6 +114,18 @@ int main(int argc, char **argv){
 	return 0;
 }
 
+void killChatServerHandler(int d){
+	printf("Caught signal!\n");
+	return;
+}
+
+/* clientThreadOp is run on client threads. It calls instatiateClient
+ * to first print the state of the chat rooms to the client and to
+ * solicits information of him/her. It then continuously reads from
+ * the client, appending this text to the message queue to be
+ * printed to all clients via signaling the room thread's condition
+ * variable. Note all read/print operations are performed via the
+ * respective socket connections */
 void *clientThreadOp(void *package){
 	JRB rooms;
 	int fd;
@@ -120,30 +139,35 @@ void *clientThreadOp(void *package){
 	rooms = (JRB) ((startClient*) package)->rooms;
 
 	ifcode = instantiateClient(rooms, client); 
-	if(ifcode == success){
 
+	if(ifcode == success){
+		/* Continuously read from client, appending messages as they are read */
 		while(fgets(str, 1000, client->sockin) != NULL && (feof(client->sockin) == 0)){
-			printf("Client typed: %s", str);
 			message = (char*) malloc(sizeof(char) * (strlen(str)
-						+ strlen(client->name) + 9));
-			sprintf(message, "%s: %s", client->name, str);
-			pthread_mutex_lock(client->inRoom->room_lock);
+						+ strlen(client->name) + 4));
+			sprintf(message, "%s: %s", client->name, str); /* Create message string */
+			pthread_mutex_lock(client->inRoom->room_lock); /* Lock the mutex for appending message */
 			printf("Locked mutex for room %s\n", client->inRoom->name);
+			printf("Message from client %s in room %s: %s\n",
+					client->name, client->inRoom->name, message); 
+			printf("Appending to %s's message queue and signaling", client->inRoom->name);
 			dll_append(client->inRoom->messages, new_jval_s(message));
-			pthread_cond_signal(client->inRoom->room_cond);
+			pthread_cond_signal(client->inRoom->room_cond); /* Signal room to print message */
 			pthread_mutex_unlock(client->inRoom->room_lock);
 			printf("Unlocked mutex for room %s\n", client->inRoom->name);
 		}
-		printf("Client left normally\n");
-		handleClientLeft(client);
+		handleClientLeft(client); /* Read failure indicates that client left */
 	}
+	/* If client left during instantiateClient and specified name,
+	 * free memory accordingly */
 	else if(ifcode == nameAllocated){
-		printf("Freeing when name allocated\n");
+		printf("Client %s left before specifying chat room\n", client->name);
 		destroyClient(client, 0);
-		return NULL;
 	}
+	/* If client left during instantiateClient and didn't specify name,
+	 * free memory accordingly */ 
 	else if(ifcode == nameNotAllocated){
-		printf("Freeing when name not allocated\n");
+		printf("Client left before specifying name\n");
 		fclose(client->sockin);
 		fclose(client->sockout);
 		close(client->fd);
@@ -152,16 +176,29 @@ void *clientThreadOp(void *package){
 	else {
 		fprintf(stderr, "WARNING: Unknown IFCODE %d\n", ifcode);
 	}
+	pthread_exit(NULL);
 }
 
+/* instantiateClient prints the current state of the
+ * chat rooms to the client `c`'s socket FILE * opened for
+ * writing. This state includes the chat rooms and the
+ * participants of each. Following this, it solicits information
+ * from the client, including his/her name and the desired
+ * chat room. Following successful specification of all required
+ * info, a message indicating the client's entrance into the
+ * specified chat room is added to the message queue, and the
+ * client is in its final state for participation in the chat room */
 int instantiateClient(JRB t, Client *c){
 	int check;
 	char *newMessage;
 	JRB jtmp;
 	Dllist dtmp;
 	Room *rtmp;
-	char buf[500];
+	char buf[1000];
 
+	/* NOTE: Checks are performed on each I/O operation here
+	 * to detect client egress and handle it accordingly */
+	 
 	if(fprintf(c->sockout, "Chat Rooms:\n") < 0){ return nameNotAllocated; }
 
 	/* Print state of chat rooms */
@@ -189,7 +226,7 @@ int instantiateClient(JRB t, Client *c){
 		return nameNotAllocated;
 	}
 	if(fflush(c->sockout) == EOF || feof(c->sockout)){ return nameNotAllocated; }
-	fgets(buf, 500, c->sockin); if((feof(c->sockin) != 0) || buf == NULL){
+	fgets(buf, 1000, c->sockin); if((feof(c->sockin) != 0) || buf == NULL){
 		return nameNotAllocated;
 	}
 	buf[strlen(buf)-1] = '\0';
@@ -198,19 +235,19 @@ int instantiateClient(JRB t, Client *c){
 	/* Prompt user for chat room name */
 	if(fprintf(c->sockout, "Enter chat room:\n") < 0){ return nameAllocated; }
 	if(fflush(c->sockout) == EOF || feof(c->sockout)){ return nameAllocated; }
-	fgets(buf, 500, c->sockin); if((feof(c->sockin) != 0) || buf == NULL){
+	fgets(buf, 1000, c->sockin); if((feof(c->sockin) != 0) || buf == NULL){
 		return nameAllocated;
 	}
 	buf[strlen(buf)-1] = '\0';
 	jtmp = jrb_find_str(t, buf);
-	while(jtmp == NULL){ /* Continue to prompt until user specifies valid chat room */
+	while(jtmp == NULL){ /* Prompt until user specifies valid chat room */
 		if(fprintf(c->sockout, "No chat room %s\n", buf) < 0){
 			return nameAllocated;
 		}
 		if(fflush(c->sockout) == EOF || feof(c->sockout)){
 			return nameAllocated;
 		}
-		fgets(buf, 500, c->sockin); 
+		fgets(buf, 1000, c->sockin); 
 		if((feof(c->sockin) != 0) || buf == NULL){ return nameAllocated; }
 		buf[strlen(buf)-1] = '\0';
 		jtmp = jrb_find_str(t, buf);
@@ -220,13 +257,14 @@ int instantiateClient(JRB t, Client *c){
 	newMessage = (char *) malloc(sizeof(char) * (strlen(c->name)+14));
 	sprintf(newMessage, "%s has joined\n", c->name);
 
-	/* Append the client to the clients Dllist, and add new client message to 
-	 * the messages Dllist */
+	/* Append the client to the clients Dllist, add the 
+	 * new client message to the messages Dllist, and
+	 * signal the resepective chat room */
 	pthread_mutex_lock(c->inRoom->room_lock);
 	printf("Locked mutex for room %s\n", rtmp->name);
 	dll_append(c->inRoom->clients, new_jval_v(c));
 	dll_append(c->inRoom->messages, new_jval_s(newMessage));
-	c->listPtr = c->inRoom->clients->blink;
+	c->listPtr = dll_last(c->inRoom->clients);
 	pthread_cond_signal(c->inRoom->room_cond);
 	pthread_mutex_unlock(c->inRoom->room_lock);
 	printf("Unlocked mutex for room %s\n", rtmp->name);
@@ -238,68 +276,83 @@ void destroyClient(Client *client, int onList){
 	close(client->fd);
 	fclose(client->sockin);
 	fclose(client->sockout);
-	printf("Freeing name\n");
 	free(client->name);
 	if(onList != 0){
-		printf("Deleting from Dllist\n");
 		dll_delete_node(client->listPtr);
 	}
-	printf("Freeing client\n");
 	free(client);
-	printf("Done destroying client\n");
 }
 
+/* roomThreadOp is run for the resepective room threads.
+ * It performs the dispatch of messages in the message
+ * queue to all clients in the chat room for which the
+ * thread is running and cleans the message queue after-
+ * ward. It blocks on a condition variable, waiting for
+ * another thread to signal it (indicating that there are
+ * messages to be dispatched */
 void *roomThreadOp(void *package){
 	Dllist mdll, cdll;
 	Room *r;
 	r = (Room *) package;
 	printf("Locked mutex for room %s\n", r->name);
 	pthread_mutex_lock(r->room_lock);
-	while(1){ /* When signaled, print the messages in the message queue */
+	while(1){ /* Print messages in message queue when signaled */
 		printf("Unlocked mutex for room %s\n", r->name);
+		printf("Room %s blocking on condition variable\n", r->name);
 		pthread_cond_wait(r->room_cond, r->room_lock);
+		printf("Room %s signaled and active\n", r->name);
 		printf("Locked mutex for room %s\n", r->name);
+		/* Dispatch all messages to all clients */
 		while(!dll_empty(r->messages)){ 
-			mdll = r->messages->flink;
-		/* Send all the messages and clean up the message queue */
-			printf("Message from client: %s", jval_s(mdll->val));
+			mdll = dll_first(r->messages);
+			printf("Sending message to all clients: %s",
+					jval_s(mdll->val));
+			/* Send message to all clients */
 			dll_traverse(cdll, r->clients){
-				if(sendMessage(((Client*) jval_v(cdll->val)), jval_s(mdll->val)) < 0){
-					printf("WARNING: Client is gone!\n");
+				if(sendMessage(((Client*) jval_v(cdll->val)),
+							jval_s(mdll->val)) < 0){
+					/* If client left, free client's resources */
+					destroyClient((Client*) jval_v(cdll->val), 1);
 				}
 			}
-			printf("Freeing message resources\n");
-			// free(jval_s(mdll->val));
-			printf("Freeing node\n");
+			/* Free allocated resources for this message */
+			free(mdll->val.s);
 			dll_delete_node(mdll);
 		}
 	}
 }
 
+/* sendMessage prints the message given by `message`
+ * to Client `client` via its socket FILE*, checking
+ * to ensure the printing did not fail. It returns 0
+ * if the subroutine was successful and -1 if the print
+ * failed to indicate that the client left */
 int sendMessage(Client *client, char *message){
 	int check;
-	printf("Sending message to %s: %s", client->name, message);
 	if(fputs(message, client->sockout) < 1){ return -1; }
 	if(fflush(client->sockout) == EOF){ return -1; }
-	printf("Done sending\n");
 	return 0;
 }
 
+/* handleClientLeft serves as an all-in-one interface to the
+ * freeing of the resources allocated for the Client `client`
+ * and the formation of a message indicating this. It calls
+ * `destroyClient` to handle the freeing of allocated resources,
+ * and then creates and appends a message to the chat room of
+ * which `client` was in, signaling said room after appending */
 void handleClientLeft(Client *client){
 	Room *room;
 	char *message;
 	room = client->inRoom;
 	pthread_mutex_lock(room->room_lock);
 	printf("Locked mutex for room %s\n", room->name);
-	message = (char*) malloc(sizeof(char) * (strlen(client->name) + 10));
 	printf("Client %s has left\n", client->name);
+	message = (char*) malloc(sizeof(char) * (strlen(client->name) + 11));
 	sprintf(message, "%s has left\n", client->name);
 	printf("Cleaning up after client\n");
 	destroyClient(client, 1);
-	printf("Dispatching message...\n");
 	dll_append(room->messages, new_jval_s(message));
 	pthread_cond_signal(room->room_cond);
-	printf("...Done sending client left message\n");
 	pthread_mutex_unlock(room->room_lock);
 	printf("Unlocked mutex for room %s\n", room->name);
 }
