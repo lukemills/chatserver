@@ -54,11 +54,6 @@ int main(int argc, char **argv){
 	startClient sctmp;
 	pthread_t clientT, roomT;
 
-	/* TODO Fix signal handling or remove
-	   signal(SIGINT, killChatServerHandler);
-	   signal(SIGKILL, killChatServerHandler);
-	 */
-
 	if(argc < 3){
 		fprintf(stderr, "usage: ./chat-server port Chat-Room-Names ...\n");
 		exit(1);
@@ -116,11 +111,6 @@ int main(int argc, char **argv){
 	return 0;
 }
 
-void killChatServerHandler(int d){
-	printf("Caught signal!\n");
-	return;
-}
-
 /* clientThreadOp is run on client threads. It calls instatiateClient
  * to first print the state of the chat rooms to the client and to
  * solicits information of him/her. It then continuously reads from
@@ -135,6 +125,8 @@ void *clientThreadOp(void *package){
 	char *message;
 	Client *client;
 	IFAIL ifcode;
+
+	pthread_detach(pthread_self());
 
 	/* Extract Client instance and `rooms` JRB */
 	client = (Client*) ((startClient*) package)->client;
